@@ -127,7 +127,7 @@ namespace ScreenTranslator.UI
             WindowChrome.SetWindowChrome(this, new WindowChrome
             {
                 CaptionHeight = 0,
-                ResizeBorderThickness = new Thickness(6),
+                ResizeBorderThickness = new Thickness(4),
                 GlassFrameThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(0),
                 UseAeroCaptionButtons = false
@@ -246,6 +246,7 @@ namespace ScreenTranslator.UI
 
             bar.MouseLeftButtonDown += (s, e) =>
             {
+                if (e.Handled) return;
                 if (e.ClickCount == 2)
                 {
                     WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
@@ -310,10 +311,15 @@ namespace ScreenTranslator.UI
                 FontWeight = FontWeights.Medium
             };
             _headerStatusBadge.Child = _headerStatusText;
-            _headerStatusBadge.MouseLeftButtonUp += (s, e) =>
+            WindowChrome.SetIsHitTestVisibleInChrome(_headerStatusBadge, true);
+            _headerStatusBadge.MouseLeftButtonDown += (s, e) =>
             {
                 e.Handled = true;
                 _hotkeys.TogglePaused();
+            };
+            _headerStatusBadge.MouseLeftButtonUp += (s, e) =>
+            {
+                e.Handled = true;
             };
             leftRow.Children.Add(_headerStatusBadge);
             UpdateHeaderStatus();
@@ -327,6 +333,7 @@ namespace ScreenTranslator.UI
                 Orientation = Orientation.Horizontal,
                 VerticalAlignment = VerticalAlignment.Center
             };
+            WindowChrome.SetIsHitTestVisibleInChrome(rightRow, true);
 
             var themeBtn = new Border
             {
@@ -338,6 +345,7 @@ namespace ScreenTranslator.UI
                 ToolTip = "Переключить тему оформления (Тёмная / Светлая)",
                 Margin = new Thickness(0, 0, 4, 0)
             };
+            WindowChrome.SetIsHitTestVisibleInChrome(themeBtn, true);
             _themeToggleIcon = VectorIcons.CreateIcon(
                 _settings.Current.Theme == AppTheme.Dark ? VectorIcons.Sun : VectorIcons.Moon,
                 15,
@@ -347,7 +355,7 @@ namespace ScreenTranslator.UI
             themeBtn.Child = _themeToggleIcon;
             themeBtn.MouseEnter += (s, e) => themeBtn.SetResourceReference(Border.BackgroundProperty, "CardHoverBrush");
             themeBtn.MouseLeave += (s, e) => themeBtn.Background = Brushes.Transparent;
-            themeBtn.MouseLeftButtonUp += (s, e) =>
+            themeBtn.MouseLeftButtonDown += (s, e) =>
             {
                 e.Handled = true;
                 var nextTheme = _settings.Current.Theme == AppTheme.Dark ? AppTheme.Light : AppTheme.Dark;
@@ -357,9 +365,14 @@ namespace ScreenTranslator.UI
                 _themeToggleIcon.Data = Geometry.Parse(nextTheme == AppTheme.Dark ? VectorIcons.Sun : VectorIcons.Moon);
                 if (_activePageId == "appearance") SelectPage("appearance");
             };
+            themeBtn.MouseLeftButtonUp += (s, e) =>
+            {
+                e.Handled = true;
+            };
             rightRow.Children.Add(themeBtn);
 
             var minBtn = UiKit.CreateIconButton(VectorIcons.Minimize, "Свернуть окно", () => WindowState = WindowState.Minimized);
+            WindowChrome.SetIsHitTestVisibleInChrome(minBtn, true);
             minBtn.Margin = new Thickness(0, 0, 4, 0);
             rightRow.Children.Add(minBtn);
 
@@ -367,6 +380,7 @@ namespace ScreenTranslator.UI
                 VectorIcons.Close,
                 _settings.Current.MinimizeToTrayOnClose ? "Свернуть в системный трей" : "Закрыть приложение",
                 () => Close());
+            WindowChrome.SetIsHitTestVisibleInChrome(closeBtn, true);
             rightRow.Children.Add(closeBtn);
 
             Grid.SetColumn(rightRow, 2);
@@ -512,10 +526,14 @@ namespace ScreenTranslator.UI
                     btnBorder.Background = Brushes.Transparent;
                 }
             };
-            btnBorder.MouseLeftButtonUp += (s, e) =>
+            btnBorder.MouseLeftButtonDown += (s, e) =>
             {
                 e.Handled = true;
                 SelectPage(capturedId);
+            };
+            btnBorder.MouseLeftButtonUp += (s, e) =>
+            {
+                e.Handled = true;
             };
 
             parent.Children.Add(btnBorder);
@@ -1901,12 +1919,60 @@ namespace ScreenTranslator.UI
             var infoStack = new StackPanel();
             var title = new TextBlock
             {
-                Text = "Screen Translator для Windows — Версия 1.0.0 (x64)",
+                Text = "Screen Translator для Windows — Версия 1.1.0 (x64)",
                 FontSize = 15,
                 FontWeight = FontWeights.SemiBold
             };
             title.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimaryBrush");
             infoStack.Children.Add(title);
+
+            var authorRow = new Grid { Margin = new Thickness(0, 12, 0, 4) };
+            authorRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            authorRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            var authorLeft = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            var authorTitle = new TextBlock
+            {
+                Text = "Автор и разработчик: paraxyoz",
+                FontSize = 13.5,
+                FontWeight = FontWeights.SemiBold
+            };
+            authorTitle.SetResourceReference(TextBlock.ForegroundProperty, "AccentBrush");
+            authorLeft.Children.Add(authorTitle);
+
+            var authorDesc = new TextBlock
+            {
+                Text = "Официальный репозиторий с исходным кодом, установщиком и документацией доступен на GitHub.",
+                FontSize = 12,
+                Margin = new Thickness(0, 2, 0, 0),
+                TextWrapping = TextWrapping.Wrap
+            };
+            authorDesc.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
+            authorLeft.Children.Add(authorDesc);
+            Grid.SetColumn(authorLeft, 0);
+            authorRow.Children.Add(authorLeft);
+
+            var authorBtns = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var ghAuthorBtn = UiKit.CreateSecondaryButton("Автор: paraxyoz", null, () =>
+            {
+                try { Process.Start(new ProcessStartInfo("https://github.com/paraxyoz") { UseShellExecute = true }); } catch { }
+            });
+            ghAuthorBtn.Margin = new Thickness(0, 0, 8, 0);
+            authorBtns.Children.Add(ghAuthorBtn);
+
+            var ghRepoBtn = UiKit.CreatePrimaryButton("GitHub Репозиторий", null, () =>
+            {
+                try { Process.Start(new ProcessStartInfo("https://github.com/paraxyoz/screen-translator") { UseShellExecute = true }); } catch { }
+            });
+            authorBtns.Children.Add(ghRepoBtn);
+
+            Grid.SetColumn(authorBtns, 1);
+            authorRow.Children.Add(authorBtns);
+            infoStack.Children.Add(authorRow);
 
             var techText = new TextBlock
             {

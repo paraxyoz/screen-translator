@@ -258,6 +258,7 @@ namespace ScreenTranslator
                 targetWin.UpdateLayout();
                 await Task.Delay(300);
 
+                settings.Current.ShowOverlayToolbar = true;
                 var targetRect = new Rectangle(220, 220, 540, 130);
                 await coordinator.TranslateRegionRectAsync(targetRect);
                 await Task.Delay(300);

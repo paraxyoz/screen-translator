@@ -144,10 +144,14 @@ namespace ScreenTranslator.UI
 
             border.MouseEnter += (s, e) => border.SetResourceReference(Border.BackgroundProperty, "AccentHoverBrush");
             border.MouseLeave += (s, e) => border.SetResourceReference(Border.BackgroundProperty, "AccentBrush");
-            border.MouseLeftButtonUp += (s, e) =>
+            border.MouseLeftButtonDown += (s, e) =>
             {
                 e.Handled = true;
                 onClick?.Invoke();
+            };
+            border.MouseLeftButtonUp += (s, e) =>
+            {
+                e.Handled = true;
             };
 
             return border;
@@ -191,10 +195,14 @@ namespace ScreenTranslator.UI
 
             border.MouseEnter += (s, e) => border.SetResourceReference(Border.BackgroundProperty, "CardHoverBrush");
             border.MouseLeave += (s, e) => border.SetResourceReference(Border.BackgroundProperty, "InputBgBrush");
-            border.MouseLeftButtonUp += (s, e) =>
+            border.MouseLeftButtonDown += (s, e) =>
             {
                 e.Handled = true;
                 onClick?.Invoke();
+            };
+            border.MouseLeftButtonUp += (s, e) =>
+            {
+                e.Handled = true;
             };
 
             return border;
@@ -228,10 +236,14 @@ namespace ScreenTranslator.UI
                 border.Background = Brushes.Transparent;
                 icon.SetResourceReference(Shape.StrokeProperty, "TextSecondaryBrush");
             };
-            border.MouseLeftButtonUp += (s, e) =>
+            border.MouseLeftButtonDown += (s, e) =>
             {
                 e.Handled = true;
                 onClick?.Invoke();
+            };
+            border.MouseLeftButtonUp += (s, e) =>
+            {
+                e.Handled = true;
             };
 
             return border;
@@ -293,12 +305,16 @@ namespace ScreenTranslator.UI
 
             UpdateVisual(state, animate: false);
 
-            track.MouseLeftButtonUp += (s, e) =>
+            track.MouseLeftButtonDown += (s, e) =>
             {
                 e.Handled = true;
                 state = !state;
                 UpdateVisual(state, animate: true);
                 onChanged?.Invoke(state);
+            };
+            track.MouseLeftButtonUp += (s, e) =>
+            {
+                e.Handled = true;
             };
 
             return track;
@@ -402,13 +418,17 @@ namespace ScreenTranslator.UI
                 itemBorder.MouseEnter += (s, e) => itemBorder.SetResourceReference(Border.BackgroundProperty, "CardHoverBrush");
                 itemBorder.MouseLeave += (s, e) => itemBorder.Background = Brushes.Transparent;
                 string capturedVal = opt.Value;
-                itemBorder.MouseLeftButtonUp += (s, e) =>
+                itemBorder.MouseLeftButtonDown += (s, e) =>
                 {
                     e.Handled = true;
                     currentValue = capturedVal;
                     RefreshLabel();
                     popup.IsOpen = false;
                     onSelected?.Invoke(currentValue);
+                };
+                itemBorder.MouseLeftButtonUp += (s, e) =>
+                {
+                    e.Handled = true;
                 };
 
                 itemsStack.Children.Add(itemBorder);
@@ -419,11 +439,15 @@ namespace ScreenTranslator.UI
 
             buttonBorder.MouseEnter += (s, e) => buttonBorder.SetResourceReference(Border.BorderBrushProperty, "BorderFocusBrush");
             buttonBorder.MouseLeave += (s, e) => buttonBorder.SetResourceReference(Border.BorderBrushProperty, "BorderSubtleBrush");
-            buttonBorder.MouseLeftButtonUp += (s, e) =>
+            buttonBorder.MouseLeftButtonDown += (s, e) =>
             {
                 e.Handled = true;
                 popupBorder.MinWidth = buttonBorder.ActualWidth;
                 popup.IsOpen = !popup.IsOpen;
+            };
+            buttonBorder.MouseLeftButtonUp += (s, e) =>
+            {
+                e.Handled = true;
             };
 
             return buttonBorder;

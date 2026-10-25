@@ -5,6 +5,9 @@ if (!(Test-Path $msbuild)) {
     $msbuild = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe"
 }
 
+Get-Process -Name "ScreenTranslator" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 200
+
 Write-Host "=== 1. Сборка основного приложения (Release x64) ===" -ForegroundColor Cyan
 & $msbuild "$root\src\ScreenTranslator\ScreenTranslator.csproj" /p:Configuration=Release /v:minimal
 
