@@ -39,7 +39,7 @@ namespace ScreenTranslator.Models
         public Color BackgroundColor { get; set; } = Color.FromArgb(24, 27, 34);
         public Color ForegroundColor { get; set; } = Color.FromArgb(241, 245, 249);
         public double BackgroundVariance { get; set; }
-        public bool IsComplexBackground => BackgroundVariance > 28.0;
+        public bool IsComplexBackground => BackgroundVariance > 42.0;
     }
 
     public sealed class RecognizedWordRect
@@ -128,6 +128,15 @@ namespace ScreenTranslator.Models
             return string.Join(" + ", parts);
         }
 
+        public static bool IsMouseVirtualKey(uint vk)
+        {
+            return vk == Win32.NativeMethods.VK_LBUTTON
+                || vk == Win32.NativeMethods.VK_RBUTTON
+                || vk == Win32.NativeMethods.VK_MBUTTON
+                || vk == Win32.NativeMethods.VK_XBUTTON1
+                || vk == Win32.NativeMethods.VK_XBUTTON2;
+        }
+
         public static string VirtualKeyToString(uint vk)
         {
             if (vk >= 'A' && vk <= 'Z') return ((char)vk).ToString();
@@ -135,6 +144,11 @@ namespace ScreenTranslator.Models
             if (vk >= 0x70 && vk <= 0x7B) return "F" + (vk - 0x70 + 1);
             switch (vk)
             {
+                case Win32.NativeMethods.VK_LBUTTON: return "ЛКМ";
+                case Win32.NativeMethods.VK_RBUTTON: return "ПКМ";
+                case Win32.NativeMethods.VK_MBUTTON: return "СКМ (Колёсико)";
+                case Win32.NativeMethods.VK_XBUTTON1: return "Mouse4 (Боковая 1)";
+                case Win32.NativeMethods.VK_XBUTTON2: return "Mouse5 (Боковая 2)";
                 case 0x1B: return "Esc";
                 case 0x20: return "Space";
                 case 0x09: return "Tab";
@@ -195,6 +209,7 @@ namespace ScreenTranslator.Models
         [DataMember] public bool AutoFitFontSize { get; set; } = true;
         [DataMember] public double FixedFontSize { get; set; } = 15.0;
         [DataMember] public bool ShowOverlayToolbar { get; set; } = true;
+        [DataMember] public bool HideOverlayOnLeftClick { get; set; } = true;
 
         // 4. Performance & OCR
         [DataMember] public string PreferredOcrLanguage { get; set; } = "auto";
@@ -211,6 +226,21 @@ namespace ScreenTranslator.Models
         [DataMember] public bool MinimizeToTrayOnClose { get; set; } = true;
         [DataMember] public bool SaveSessionHistory { get; set; } = true;
         [DataMember] public bool ExcludeOverlayFromCapture { get; set; } = true;
+
+        [OnDeserializing]
+        private void OnDeserializing(StreamingContext context)
+        {
+            ShowOverlayToolbar = true;
+            HideOverlayOnLeftClick = true;
+            AutoFitFontSize = true;
+            UpscaleSmallRegions = true;
+            AutoExpandCursorCapture = true;
+            EnableTranslationCache = true;
+            MinimizeToTrayOnClose = true;
+            SaveSessionHistory = true;
+            ExcludeOverlayFromCapture = true;
+            DeepLUseFreeEndpoint = true;
+        }
 
         [IgnoreDataMember]
         public TranslationProviderType Provider

@@ -239,7 +239,7 @@ namespace ScreenTranslator
                     Top = 220,
                     Width = 540,
                     Height = 130,
-                    Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(24, 28, 36)),
+                    Background = new SolidColorBrush(System.Windows.Media.Color.FromRgb(30, 75, 165)),
                     Topmost = true,
                     ShowInTaskbar = false
                 };
@@ -296,12 +296,27 @@ namespace ScreenTranslator
                 var secondOcr = await ocr.RecognizeBitmapAsync(reCapturedBmp, targetRect, "en-US", CancellationToken.None);
                 LogLine($"[OK] Anti-self-capture verification: re-capturing same region still sees original English text ('{secondOcr.FullText}')!");
 
-                // 4. Verify Hide / Restore overlay
-                overlay.ToggleOverlayVisibility();
-                bool hiddenState = !overlay.IsOverlayVisible;
+                // 4. Verify Disabling Overlay Toolbar & Hide on Left Click
+                overlay.DisableOverlayToolbar();
+                await Task.Delay(80);
+                foreach (Window w in app.Windows)
+                {
+                    if (w != mainWindow && w != targetWin && w.IsVisible)
+                    {
+                        w.UpdateLayout();
+                        SaveElementPng(w, Path.Combine(artifactsDir, "overlay_without_toolbar.png"));
+                    }
+                }
+                settings.Current.ShowOverlayToolbar = true;
+                settings.Save();
+                overlay.RefreshCurrentOverlayStyle();
+
+                await Task.Delay(260);
+                overlay.HandleGlobalLeftMouseDown(new NativeMethods.POINT { X = 10, Y = 10 });
+                bool closedByLeftClick = !overlay.IsOverlayVisible;
                 overlay.ToggleOverlayVisibility();
                 bool restoredState = overlay.IsOverlayVisible;
-                LogLine($"[OK] Overlay Hide/Restore toggle verified: Hidden={hiddenState}, Restored={restoredState}");
+                LogLine($"[OK] Overlay Toolbar toggle & Hide-on-LMB verified: ClosedByLMB={closedByLeftClick}, Restored={restoredState}");
 
                 // 5. Verify MainWindow updated with session history
                 mainWindow.WindowState = WindowState.Normal;

@@ -769,6 +769,30 @@ namespace ScreenTranslator.UI
 
             page.Children.Add(actionsGrid);
 
+            // Quick Overlay Behavior Controls (Toolbar & Hide on Left Click)
+            var quickOverlayStack = new StackPanel();
+            quickOverlayStack.Children.Add(UiKit.CreateSettingRow(
+                "Панель управления над переводом (крестик, копирование, область)",
+                "Отключите, чтобы перевод отображался чистым текстом без верхней панели кнопок.",
+                UiKit.CreateToggleSwitch(_settings.Current.ShowOverlayToolbar, val =>
+                {
+                    _settings.Current.ShowOverlayToolbar = val;
+                    _settings.Save();
+                    _overlay.RefreshCurrentOverlayStyle();
+                })));
+
+            quickOverlayStack.Children.Add(UiKit.CreateSettingRow(
+                "Скрытие перевода на ЛКМ",
+                "Автоматически скрывать активный перевод при нажатии левой кнопки мыши в любом месте экрана.",
+                UiKit.CreateToggleSwitch(_settings.Current.HideOverlayOnLeftClick, val =>
+                {
+                    _settings.Current.HideOverlayOnLeftClick = val;
+                    _settings.Save();
+                    _overlay.RefreshCurrentOverlayStyle();
+                })));
+
+            page.Children.Add(UiKit.CreateCard(quickOverlayStack));
+
             // Recent Translations History
             var histHeaderGrid = new Grid { Margin = new Thickness(0, 6, 0, 8) };
             histHeaderGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -1102,6 +1126,26 @@ namespace ScreenTranslator.UI
             // Post-translation behavior
             var behaviorStack = new StackPanel();
             behaviorStack.Children.Add(UiKit.CreateSettingRow(
+                "Скрытие перевода на ЛКМ",
+                "Автоматически скрывать перевод после нажатия левой кнопки мыши (ЛКМ).",
+                UiKit.CreateToggleSwitch(_settings.Current.HideOverlayOnLeftClick, val =>
+                {
+                    _settings.Current.HideOverlayOnLeftClick = val;
+                    _settings.Save();
+                    _overlay.RefreshCurrentOverlayStyle();
+                })));
+
+            behaviorStack.Children.Add(UiKit.CreateSettingRow(
+                "Панель управления над переводом (крестик, выбор области, копирование)",
+                "Показывать компактную панель кнопок над переведённым текстом. Отключите для показа только перевода.",
+                UiKit.CreateToggleSwitch(_settings.Current.ShowOverlayToolbar, val =>
+                {
+                    _settings.Current.ShowOverlayToolbar = val;
+                    _settings.Save();
+                    _overlay.RefreshCurrentOverlayStyle();
+                })));
+
+            behaviorStack.Children.Add(UiKit.CreateSettingRow(
                 "Автоматически копировать перевод в буфер обмена",
                 "После каждого успешного перевода текст сразу доступен для вставки (Ctrl+V).",
                 UiKit.CreateToggleSwitch(_settings.Current.AutoCopyTranslation, val =>
@@ -1140,8 +1184,8 @@ namespace ScreenTranslator.UI
         {
             var page = new StackPanel();
             page.Children.Add(UiKit.CreateSectionHeader(
-                "Глобальные горячие клавиши",
-                "Сочетания клавиш работают поверх любых окон Windows. Нажмите на кнопку с комбинацией и введите новое сочетание."));
+                "Глобальные горячие клавиши и кнопки мыши",
+                "Поддерживаются сочетания клавиатуры, а также боковые кнопки мыши (Mouse4, Mouse5), колёсико (СКМ) и кнопки мыши с модификаторами."));
 
             var hkStack = new StackPanel();
             hkStack.Children.Add(BuildHotkeyRecorderRow(_settings.Current.CursorHotkey));
@@ -1169,6 +1213,16 @@ namespace ScreenTranslator.UI
                 "Отменить выделение или закрыть текущий overlay",
                 "Перехватывается только тогда, когда открыто окно выделения области или активен overlay.",
                 escBadge));
+
+            hkStack.Children.Add(UiKit.CreateSettingRow(
+                "Скрытие перевода на ЛКМ",
+                "Скрывать активный перевод одним нажатием левой кнопки мыши (ЛКМ).",
+                UiKit.CreateToggleSwitch(_settings.Current.HideOverlayOnLeftClick, val =>
+                {
+                    _settings.Current.HideOverlayOnLeftClick = val;
+                    _settings.Save();
+                    _overlay.RefreshCurrentOverlayStyle();
+                })));
 
             var resetRow = new StackPanel
             {
@@ -1211,7 +1265,7 @@ namespace ScreenTranslator.UI
 
             var recorderBorder = new Border
             {
-                MinWidth = 155,
+                MinWidth = 175,
                 Height = 34,
                 CornerRadius = new CornerRadius(6),
                 BorderThickness = new Thickness(1),
@@ -1235,13 +1289,99 @@ namespace ScreenTranslator.UI
             recorderBorder.Child = keyLabel;
 
             bool isRecording = false;
-            recorderBorder.MouseLeftButtonUp += (s, e) =>
+
+            void ApplyNewBinding(uint mods, uint vk)
             {
-                e.Handled = true;
-                isRecording = true;
-                recorderBorder.SetResourceReference(Border.BorderBrushProperty, "BorderFocusBrush");
-                keyLabel.Text = "Нажмите клавиши...";
-                recorderBorder.Focus();
+                config.Modifiers = mods;
+                config.VirtualKey = vk;
+                isRecording = false;
+                recorderBorder.SetResourceReference(Border.BorderBrushProperty, "BorderSubtleBrush");
+
+                _settings.Save();
+                _hotkeys.RegisterAllConfiguredHotkeys();
+                keyLabel.Text = config.ToReadableString();
+                statusLabel.Text = config.StatusMessage;
+                statusLabel.SetResourceReference(
+                    TextBlock.ForegroundProperty,
+                    config.IsRegistered ? "SuccessBrush" : "WarningBrush");
+            }
+
+            recorderBorder.PreviewMouseDown += (s, e) =>
+            {
+                uint mods = 0;
+                if ((Keyboard.Modifiers & ModifierKeys.Control) != 0) mods |= NativeMethods.MOD_CONTROL;
+                if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) mods |= NativeMethods.MOD_SHIFT;
+                if ((Keyboard.Modifiers & ModifierKeys.Alt) != 0) mods |= NativeMethods.MOD_ALT;
+                if ((Keyboard.Modifiers & ModifierKeys.Windows) != 0) mods |= NativeMethods.MOD_WIN;
+
+                if (!isRecording)
+                {
+                    if (e.ChangedButton == MouseButton.Left && mods == 0)
+                    {
+                        e.Handled = true;
+                        isRecording = true;
+                        recorderBorder.SetResourceReference(Border.BorderBrushProperty, "BorderFocusBrush");
+                        keyLabel.Text = "Клавиша или кнопка мыши...";
+                        recorderBorder.Focus();
+                        return;
+                    }
+                    // Allow direct side-button click on the recorder box even before entering record mode
+                    if (e.ChangedButton == MouseButton.XButton1)
+                    {
+                        e.Handled = true;
+                        ApplyNewBinding(mods, NativeMethods.VK_XBUTTON1);
+                        return;
+                    }
+                    if (e.ChangedButton == MouseButton.XButton2)
+                    {
+                        e.Handled = true;
+                        ApplyNewBinding(mods, NativeMethods.VK_XBUTTON2);
+                        return;
+                    }
+                }
+                else
+                {
+                    e.Handled = true;
+                    if (e.ChangedButton == MouseButton.XButton1)
+                    {
+                        ApplyNewBinding(mods, NativeMethods.VK_XBUTTON1);
+                        return;
+                    }
+                    if (e.ChangedButton == MouseButton.XButton2)
+                    {
+                        ApplyNewBinding(mods, NativeMethods.VK_XBUTTON2);
+                        return;
+                    }
+                    if (e.ChangedButton == MouseButton.Middle)
+                    {
+                        ApplyNewBinding(mods, NativeMethods.VK_MBUTTON);
+                        return;
+                    }
+                    if (e.ChangedButton == MouseButton.Right)
+                    {
+                        if (mods == 0)
+                        {
+                            ShowBanner("Для правой кнопки мыши (ПКМ) удерживайте Ctrl, Shift или Alt, либо используйте боковые кнопки Mouse4 / Mouse5.", true);
+                            return;
+                        }
+                        ApplyNewBinding(mods, NativeMethods.VK_RBUTTON);
+                        return;
+                    }
+                    if (e.ChangedButton == MouseButton.Left)
+                    {
+                        if (mods != 0)
+                        {
+                            ApplyNewBinding(mods, NativeMethods.VK_LBUTTON);
+                        }
+                        else
+                        {
+                            isRecording = false;
+                            recorderBorder.SetResourceReference(Border.BorderBrushProperty, "BorderSubtleBrush");
+                            keyLabel.Text = config.ToReadableString();
+                        }
+                        return;
+                    }
+                }
             };
 
             recorderBorder.LostFocus += (s, e) =>
@@ -1285,32 +1425,31 @@ namespace ScreenTranslator.UI
                 bool isFunctionKey = key >= Key.F1 && key <= Key.F12;
                 if (mods == 0 && !isFunctionKey)
                 {
-                    ShowBanner("Используйте хотя бы одну клавишу-модификатор (Ctrl, Shift или Alt) либо клавишу F1–F12.", true);
+                    ShowBanner("Используйте хотя бы одну клавишу-модификатор (Ctrl, Shift или Alt), клавишу F1–F12 или кнопку мыши (Mouse4/Mouse5/СКМ).", true);
                     return;
                 }
 
                 int vk = KeyInterop.VirtualKeyFromKey(key);
                 if (vk <= 0) return;
 
-                config.Modifiers = mods;
-                config.VirtualKey = (uint)vk;
-                isRecording = false;
-                recorderBorder.SetResourceReference(Border.BorderBrushProperty, "BorderSubtleBrush");
-
-                _settings.Save();
-                _hotkeys.RegisterAllConfiguredHotkeys();
-                keyLabel.Text = config.ToReadableString();
-                statusLabel.Text = config.StatusMessage;
-                statusLabel.SetResourceReference(
-                    TextBlock.ForegroundProperty,
-                    config.IsRegistered ? "SuccessBrush" : "WarningBrush");
+                ApplyNewBinding(mods, (uint)vk);
             };
 
             rightStack.Children.Add(recorderBorder);
 
+            var m4Btn = UiKit.CreateSecondaryButton("Mouse4", null, () => ApplyNewBinding(0, NativeMethods.VK_XBUTTON1));
+            m4Btn.Margin = new Thickness(6, 0, 0, 0);
+            m4Btn.ToolTip = "Назначить боковую кнопку мыши Mouse4 (XButton1)";
+            rightStack.Children.Add(m4Btn);
+
+            var m5Btn = UiKit.CreateSecondaryButton("Mouse5", null, () => ApplyNewBinding(0, NativeMethods.VK_XBUTTON2));
+            m5Btn.Margin = new Thickness(4, 0, 0, 0);
+            m5Btn.ToolTip = "Назначить боковую кнопку мыши Mouse5 (XButton2)";
+            rightStack.Children.Add(m5Btn);
+
             return UiKit.CreateSettingRow(
                 config.DisplayName,
-                "Нажмите на поле справа, чтобы задать новое глобальное сочетание клавиш.",
+                "Нажмите на поле и введите сочетание клавиш или нажмите кнопку мыши (Mouse4, Mouse5, СКМ).",
                 rightStack);
         }
 
@@ -1387,6 +1526,26 @@ namespace ScreenTranslator.UI
             UpdateLivePreview();
 
             var overlayStack = new StackPanel();
+            overlayStack.Children.Add(UiKit.CreateSettingRow(
+                "Панель управления над переводом (крестик, выбор области, копирование)",
+                "Кнопки «Оригинал», «Повторить», «Область», «Копировать», «Без панели», «Переместить» и «Закрыть». Отключите, чтобы перевод показывался без панели.",
+                UiKit.CreateToggleSwitch(_settings.Current.ShowOverlayToolbar, val =>
+                {
+                    _settings.Current.ShowOverlayToolbar = val;
+                    _settings.Save();
+                    _overlay.RefreshCurrentOverlayStyle();
+                })));
+
+            overlayStack.Children.Add(UiKit.CreateSettingRow(
+                "Скрытие перевода на ЛКМ",
+                "Автоматически скрывать активный перевод при нажатии левой кнопки мыши (ЛКМ).",
+                UiKit.CreateToggleSwitch(_settings.Current.HideOverlayOnLeftClick, val =>
+                {
+                    _settings.Current.HideOverlayOnLeftClick = val;
+                    _settings.Save();
+                    _overlay.RefreshCurrentOverlayStyle();
+                })));
+
             overlayStack.Children.Add(UiKit.CreateSettingRow(
                 "Режим маскировки фона Overlay",
                 "Автоподбор анализирует пиксели вокруг строки и подбирает точный цвет фона или полупрозрачную подложку.",
@@ -1481,16 +1640,6 @@ namespace ScreenTranslator.UI
                 "Фиксированный размер шрифта (при отключённом автоподборе)",
                 "Используется, если автоматическое масштабирование выключено.",
                 fontSizePanel));
-
-            overlayStack.Children.Add(UiKit.CreateSettingRow(
-                "Показывать компактную панель действий над Overlay",
-                "Кнопки «Оригинал», «Повторить», «Область», «Копировать», «Переместить» и «Закрыть».",
-                UiKit.CreateToggleSwitch(_settings.Current.ShowOverlayToolbar, val =>
-                {
-                    _settings.Current.ShowOverlayToolbar = val;
-                    _settings.Save();
-                    _overlay.RefreshCurrentOverlayStyle();
-                })));
 
             overlayStack.Children.Add(previewBorder);
             page.Children.Add(UiKit.CreateCard(overlayStack));

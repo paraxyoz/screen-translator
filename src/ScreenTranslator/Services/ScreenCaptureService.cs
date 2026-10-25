@@ -151,8 +151,8 @@ namespace ScreenTranslator.Services
                 target = bounds;
             }
 
-            // Expand slightly by 2px to sample background perimeter around glyphs
-            Rectangle expanded = Rectangle.Intersect(Rectangle.Inflate(target, 2, 2), bounds);
+            // Expand slightly by 3px to sample clean background perimeter around glyphs
+            Rectangle expanded = Rectangle.Intersect(Rectangle.Inflate(target, 3, 3), bounds);
 
             BitmapData data = null;
             try
@@ -164,15 +164,17 @@ namespace ScreenTranslator.Services
                 byte[] buffer = new byte[stride * height];
                 Marshal.Copy(data.Scan0, buffer, 0, buffer.Length);
 
-                var rValues = new List<byte>(256);
-                var gValues = new List<byte>(256);
-                var bValues = new List<byte>(256);
-                var luminances = new List<double>(256);
+                var rValues = new List<byte>(320);
+                var gValues = new List<byte>(320);
+                var bValues = new List<byte>(320);
+                var samples = new List<(byte R, byte G, byte B, double Lum, bool IsBorder)>(320);
 
-                int stepX = Math.Max(1, width / 28);
-                int stepY = Math.Max(1, height / 14);
+                int stepX = Math.Max(1, width / 27);
+                if (stepX > 1 && stepX % 2 == 0) stepX++;
+                int stepY = Math.Max(1, height / 13);
+                if (stepY > 1 && stepY % 2 == 0) stepY++;
 
-                // Prioritize border ring pixels (top/bottom 2 rows, left/right 2 cols) where background is less occluded by glyphs
+                // Prioritize border ring pixels (top/bottom 2 rows, left/right 2 cols) where background is not occluded by glyphs
                 for (int y = 0; y < height; y++)
                 {
                     bool isBorderY = y < 2 || y >= height - 2;
@@ -182,7 +184,8 @@ namespace ScreenTranslator.Services
                     for (int x = 0; x < width; x++)
                     {
                         bool isBorderX = x < 2 || x >= width - 2;
-                        if (!isBorderY && !isBorderX && (x % stepX != 0)) continue;
+                        bool isBorder = isBorderY || isBorderX;
+                        if (!isBorder && (x % stepX != 0)) continue;
 
                         int idx = rowOffset + x * 4;
                         if (idx + 2 >= buffer.Length) continue;
@@ -190,15 +193,16 @@ namespace ScreenTranslator.Services
                         byte b = buffer[idx];
                         byte g = buffer[idx + 1];
                         byte r = buffer[idx + 2];
+                        double lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
                         rValues.Add(r);
                         gValues.Add(g);
                         bValues.Add(b);
-                        luminances.Add(0.2126 * r + 0.7152 * g + 0.0722 * b);
+                        samples.Add((r, g, b, lum, isBorder));
                     }
                 }
 
-                if (rValues.Count == 0)
+                if (samples.Count == 0)
                 {
                     return result;
                 }
@@ -211,25 +215,67 @@ namespace ScreenTranslator.Services
                 byte medR = rValues[mid];
                 byte medG = gValues[mid];
                 byte medB = bValues[mid];
+                double medLum = 0.2126 * medR + 0.7152 * medG + 0.0722 * medB;
 
-                double meanLum = 0;
-                for (int i = 0; i < luminances.Count; i++) meanLum += luminances[i];
-                meanLum /= luminances.Count;
-
-                double varianceSum = 0;
-                for (int i = 0; i < luminances.Count; i++)
+                // Filter out high-contrast text glyph strokes so they don't pollute background color or variance
+                long sumR = 0, sumG = 0, sumB = 0;
+                var bgLums = new List<double>(samples.Count);
+                foreach (var s in samples)
                 {
-                    double diff = luminances[i] - meanLum;
-                    varianceSum += diff * diff;
+                    int dist = Math.Max(Math.Abs(s.R - medR), Math.Max(Math.Abs(s.G - medG), Math.Abs(s.B - medB)));
+                    if (dist <= 55)
+                    {
+                        sumR += s.R;
+                        sumG += s.G;
+                        sumB += s.B;
+                        bgLums.Add(s.Lum);
+                    }
                 }
-                double stdDev = Math.Sqrt(varianceSum / luminances.Count);
 
-                Color bg = Color.FromArgb(medR, medG, medB);
-                double bgLum = 0.2126 * medR + 0.7152 * medG + 0.0722 * medB;
+                byte finalR = medR;
+                byte finalG = medG;
+                byte finalB = medB;
+                double stdDev;
+
+                if (bgLums.Count >= samples.Count * 0.65)
+                {
+                    finalR = (byte)Math.Round((double)sumR / bgLums.Count);
+                    finalG = (byte)Math.Round((double)sumG / bgLums.Count);
+                    finalB = (byte)Math.Round((double)sumB / bgLums.Count);
+
+                    double meanLum = 0;
+                    for (int i = 0; i < bgLums.Count; i++) meanLum += bgLums[i];
+                    meanLum /= bgLums.Count;
+
+                    double varianceSum = 0;
+                    for (int i = 0; i < bgLums.Count; i++)
+                    {
+                        double diff = bgLums[i] - meanLum;
+                        varianceSum += diff * diff;
+                    }
+                    stdDev = Math.Sqrt(varianceSum / bgLums.Count);
+                }
+                else
+                {
+                    double meanLum = 0;
+                    for (int i = 0; i < samples.Count; i++) meanLum += samples[i].Lum;
+                    meanLum /= samples.Count;
+
+                    double varianceSum = 0;
+                    for (int i = 0; i < samples.Count; i++)
+                    {
+                        double diff = samples[i].Lum - meanLum;
+                        varianceSum += diff * diff;
+                    }
+                    stdDev = Math.Sqrt(varianceSum / samples.Count);
+                }
+
+                Color bg = Color.FromArgb(finalR, finalG, finalB);
+                double bgLum = 0.2126 * finalR + 0.7152 * finalG + 0.0722 * finalB;
 
                 // Choose optimal high-contrast foreground color (WCAG contrast >= 7:1)
-                Color fg = bgLum < 140.0
-                    ? Color.FromArgb(244, 247, 251)
+                Color fg = bgLum < 145.0
+                    ? Color.FromArgb(245, 248, 255)
                     : Color.FromArgb(15, 23, 42);
 
                 result.BackgroundColor = bg;

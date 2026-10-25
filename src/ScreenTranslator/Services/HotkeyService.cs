@@ -16,6 +16,8 @@ namespace ScreenTranslator.Services
         private readonly LoggingService _logger;
         private readonly SettingsService _settings;
         private HwndSource _hwndSource;
+        private NativeMethods.LowLevelMouseProc _mouseProcDelegate;
+        private IntPtr _mouseHookHandle = IntPtr.Zero;
         private bool _escapeRegistered;
         private bool _disposed;
 
@@ -25,6 +27,7 @@ namespace ScreenTranslator.Services
         public event Action TranslateRegionRequested;
         public event Action ToggleOverlayRequested;
         public event Action EscapePressed;
+        public event Action<NativeMethods.POINT> LeftMouseButtonDown;
         public event Action<string> HotkeyConflictDetected;
         public event Action StateChanged;
 
@@ -49,7 +52,23 @@ namespace ScreenTranslator.Services
             _hwndSource = new HwndSource(parameters);
             _hwndSource.AddHook(WndProc);
 
+            InstallMouseHook();
             RegisterAllConfiguredHotkeys();
+        }
+
+        private void InstallMouseHook()
+        {
+            if (_mouseHookHandle != IntPtr.Zero) return;
+            try
+            {
+                _mouseProcDelegate = MouseHookCallback;
+                IntPtr hMod = NativeMethods.GetModuleHandle(null);
+                _mouseHookHandle = NativeMethods.SetWindowsHookEx(NativeMethods.WH_MOUSE_LL, _mouseProcDelegate, hMod, 0);
+            }
+            catch (Exception ex)
+            {
+                _logger?.Warn("HotkeyService", "Не удалось установить хук мыши: " + ex.Message);
+            }
         }
 
         public List<string> RegisterAllConfiguredHotkeys()
@@ -99,6 +118,13 @@ namespace ScreenTranslator.Services
                     config.IsRegistered = false;
                     config.StatusMessage = "Не задано";
                 }
+                return;
+            }
+
+            if (HotkeyConfig.IsMouseVirtualKey(config.VirtualKey))
+            {
+                config.IsRegistered = true;
+                config.StatusMessage = "Активно (мышь)";
                 return;
             }
 
@@ -193,12 +219,99 @@ namespace ScreenTranslator.Services
             return IntPtr.Zero;
         }
 
+        private IntPtr MouseHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0)
+            {
+                try
+                {
+                    int msg = wParam.ToInt32();
+                    uint mouseVk = 0;
+
+                    if (msg == NativeMethods.WM_LBUTTONDOWN) mouseVk = NativeMethods.VK_LBUTTON;
+                    else if (msg == NativeMethods.WM_RBUTTONDOWN) mouseVk = NativeMethods.VK_RBUTTON;
+                    else if (msg == NativeMethods.WM_MBUTTONDOWN) mouseVk = NativeMethods.VK_MBUTTON;
+                    else if (msg == NativeMethods.WM_XBUTTONDOWN)
+                    {
+                        var hookStruct = System.Runtime.InteropServices.Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
+                        ushort button = (ushort)((hookStruct.mouseData >> 16) & 0xFFFF);
+                        if (button == 1) mouseVk = NativeMethods.VK_XBUTTON1;
+                        else if (button == 2) mouseVk = NativeMethods.VK_XBUTTON2;
+                    }
+
+                    if (mouseVk != 0)
+                    {
+                        var hookInfo = System.Runtime.InteropServices.Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
+                        uint mods = NativeMethods.GetCurrentKeyboardModifiers();
+                        ProcessMouseButtonDown(mouseVk, mods, hookInfo.pt);
+                    }
+                }
+                catch
+                {
+                    // Never throw inside a low-level hook
+                }
+            }
+            return NativeMethods.CallNextHookEx(_mouseHookHandle, nCode, wParam, lParam);
+        }
+
+        public bool ProcessMouseButtonDown(uint mouseVk, uint activeModifiers, NativeMethods.POINT pt)
+        {
+            if (!IsPaused)
+            {
+                if (MatchesMouseHotkey(_settings.Current.CursorHotkey, mouseVk, activeModifiers))
+                {
+                    DispatchAsync(() => TranslateCursorRequested?.Invoke());
+                    return true;
+                }
+                if (MatchesMouseHotkey(_settings.Current.RegionHotkey, mouseVk, activeModifiers))
+                {
+                    DispatchAsync(() => TranslateRegionRequested?.Invoke());
+                    return true;
+                }
+                if (MatchesMouseHotkey(_settings.Current.ToggleOverlayHotkey, mouseVk, activeModifiers))
+                {
+                    DispatchAsync(() => ToggleOverlayRequested?.Invoke());
+                    return true;
+                }
+            }
+
+            if (mouseVk == NativeMethods.VK_LBUTTON)
+            {
+                DispatchAsync(() => LeftMouseButtonDown?.Invoke(pt));
+            }
+            return false;
+        }
+
+        private static bool MatchesMouseHotkey(HotkeyConfig cfg, uint mouseVk, uint activeModifiers)
+        {
+            if (cfg == null || cfg.VirtualKey == 0) return false;
+            return cfg.VirtualKey == mouseVk && cfg.Modifiers == activeModifiers;
+        }
+
+        private static void DispatchAsync(Action action)
+        {
+            var app = System.Windows.Application.Current;
+            if (app != null && app.Dispatcher != null)
+            {
+                app.Dispatcher.BeginInvoke(action);
+            }
+            else
+            {
+                action?.Invoke();
+            }
+        }
+
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
             try
             {
+                if (_mouseHookHandle != IntPtr.Zero)
+                {
+                    NativeMethods.UnhookWindowsHookEx(_mouseHookHandle);
+                    _mouseHookHandle = IntPtr.Zero;
+                }
                 SetEscapeHookEnabled(false);
                 UnregisterMainHotkeys();
                 if (_hwndSource != null)

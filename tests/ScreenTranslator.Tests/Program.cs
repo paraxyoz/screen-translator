@@ -33,6 +33,9 @@ namespace ScreenTranslator.Tests
             RunTest("ScreenCaptureService_HandlesMultiMonitorNegativeCoordinates", TestMultiMonitorNegativeCoordinates);
             RunTest("HotkeyConfig_FormatsModifiersAndKeysCorrectly", TestHotkeyFormatting);
             RunTest("TrayService_GeneratesValidVectorIcon", TestTrayIconCreation);
+            RunTest("ScreenCaptureService_PreservesBlueBackgroundWithWhiteText", TestBlueBackgroundWithWhiteTextPreservesBlue);
+            RunTest("TextRecognitionService_MergesCollinearHorizontalLineFragments", TestMergeCollinearHorizontalLines);
+            RunTest("HotkeyConfig_SupportsMouseAndSideButtons", TestMouseHotkeyFormatting);
 
             Console.WriteLine("---------------------------------------------");
             Console.WriteLine($"Total: {_passed + _failed} | Passed: {_passed} | Failed: {_failed}");
@@ -342,6 +345,100 @@ namespace ScreenTranslator.Tests
             if (hIcon != IntPtr.Zero)
             {
                 Win32.NativeMethods.DeleteObject(hIcon);
+            }
+        }
+
+        private static void TestBlueBackgroundWithWhiteTextPreservesBlue()
+        {
+            using var blueBmp = new Bitmap(260, 60);
+            var targetBlue = Color.FromArgb(30, 75, 165);
+            using (var g = Graphics.FromImage(blueBmp))
+            {
+                g.Clear(targetBlue);
+                using var f = new Font("Segoe UI", 16, FontStyle.Bold);
+                g.DrawString("White Text On Blue", f, Brushes.White, new PointF(14, 14));
+            }
+
+            var style = ScreenCaptureService.SampleRegionStyle(blueBmp, new Rectangle(12, 12, 220, 34));
+            AssertTrue(!style.IsComplexBackground, $"Solid blue background with text must NOT be marked complex (variance={style.BackgroundVariance:F1})");
+            AssertTrue(style.BackgroundColor.B >= 135 && style.BackgroundColor.B > style.BackgroundColor.R * 2,
+                $"Expected sampled blue background to stay blue, got RGB({style.BackgroundColor.R},{style.BackgroundColor.G},{style.BackgroundColor.B})");
+
+            var (overlayBg, overlayFg) = OverlayService.ComputeAutoSampleColors(style, 240);
+            AssertTrue(overlayBg.B >= 135 && overlayBg.B > overlayBg.R * 2,
+                $"Expected Overlay AutoSample color to preserve blue background, got RGB({overlayBg.R},{overlayBg.G},{overlayBg.B})");
+        }
+
+        private static void TestMergeCollinearHorizontalLines()
+        {
+            using var bmp = new Bitmap(300, 60);
+            using (var g = Graphics.FromImage(bmp)) g.Clear(Color.FromArgb(25, 30, 40));
+
+            var rawLines = new List<RecognizedTextLine>
+            {
+                new RecognizedTextLine
+                {
+                    Text = "Hello",
+                    BoundingBox = new Rectangle(15, 18, 60, 22),
+                    ScreenBoundingBox = new Rectangle(115, 118, 60, 22)
+                },
+                new RecognizedTextLine
+                {
+                    Text = "world",
+                    BoundingBox = new Rectangle(85, 19, 65, 22),
+                    ScreenBoundingBox = new Rectangle(185, 119, 65, 22)
+                },
+                new RecognizedTextLine
+                {
+                    Text = "today",
+                    BoundingBox = new Rectangle(160, 18, 65, 22),
+                    ScreenBoundingBox = new Rectangle(260, 118, 65, 22)
+                }
+            };
+
+            var merged = TextRecognitionService.MergeCollinearHorizontalLines(rawLines, bmp, new Rectangle(100, 100, 300, 60));
+            AssertEqual(1, merged.Count, "Expected 3 collinear horizontal segments to merge into 1 line");
+            AssertEqual("Hello world today", merged[0].Text, "Merged horizontal line text mismatch");
+            AssertEqual(15, merged[0].BoundingBox.Left, "Merged Left mismatch");
+            AssertEqual(225, merged[0].BoundingBox.Right, "Merged Right mismatch");
+        }
+
+        private static void TestMouseHotkeyFormatting()
+        {
+            var side1 = new HotkeyConfig { Modifiers = 0, VirtualKey = Win32.NativeMethods.VK_XBUTTON1 };
+            AssertEqual("Mouse4 (Боковая 1)", side1.ToReadableString(), "Side button 1 formatting mismatch");
+
+            var side2 = new HotkeyConfig { Modifiers = Win32.NativeMethods.MOD_CONTROL, VirtualKey = Win32.NativeMethods.VK_XBUTTON2 };
+            AssertEqual("Ctrl + Mouse5 (Боковая 2)", side2.ToReadableString(), "Ctrl + Side button 2 formatting mismatch");
+            AssertTrue(HotkeyConfig.IsMouseVirtualKey(Win32.NativeMethods.VK_XBUTTON1), "VK_XBUTTON1 should be recognized as mouse key");
+
+            string tempDir = Path.Combine(Path.GetTempPath(), "ScreenTranslatorMouseHk_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                var logger = new LoggingService(tempDir);
+                var settings = new SettingsService(logger, Path.Combine(tempDir, "settings.json"));
+                settings.Current.CursorHotkey = new HotkeyConfig
+                {
+                    ActionId = "TranslateCursor",
+                    DisplayName = "Перевести текст под курсором",
+                    Modifiers = 0,
+                    VirtualKey = Win32.NativeMethods.VK_XBUTTON1
+                };
+                using var hkService = new HotkeyService(logger, settings);
+                bool cursorTriggered = false;
+                bool lmbTriggered = false;
+                hkService.TranslateCursorRequested += () => cursorTriggered = true;
+                hkService.LeftMouseButtonDown += pt => lmbTriggered = true;
+
+                bool matched = hkService.ProcessMouseButtonDown(Win32.NativeMethods.VK_XBUTTON1, 0, new Win32.NativeMethods.POINT { X = 200, Y = 200 });
+                AssertTrue(matched && cursorTriggered, "Expected Mouse4 (VK_XBUTTON1) hotkey to trigger TranslateCursorRequested");
+
+                hkService.ProcessMouseButtonDown(Win32.NativeMethods.VK_LBUTTON, 0, new Win32.NativeMethods.POINT { X = 250, Y = 250 });
+                AssertTrue(lmbTriggered, "Expected Left Mouse Button click to fire LeftMouseButtonDown for HideOverlayOnLeftClick");
+            }
+            finally
+            {
+                if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
             }
         }
     }

@@ -36,10 +36,12 @@ namespace ScreenTranslator.Services
         private bool _showingOriginalBitmap;
         private bool _isMoveMode;
         private bool _affinityApplied;
+        private DateTime _lastShownUtc = DateTime.MinValue;
 
         public event Action RepeatTranslationRequested;
         public event Action SelectNewRegionRequested;
         public event Action OverlayVisibilityChanged;
+        public event Action ToolbarSettingChanged;
 
         public bool HasActiveOverlay => _overlayWindow != null && _overlayWindow.IsLoaded;
         public bool IsOverlayVisible => HasActiveOverlay && _overlayWindow.Visibility == Visibility.Visible && _isTranslationVisible;
@@ -49,6 +51,69 @@ namespace ScreenTranslator.Services
         {
             _logger = logger;
             _settings = settings;
+        }
+
+        public void HandleGlobalLeftMouseDown(NativeMethods.POINT pt)
+        {
+            if (!_settings.Current.HideOverlayOnLeftClick) return;
+            if (!IsOverlayVisible) return;
+
+            // Ignore clicks that happened immediately when the overlay appeared (e.g. mouse hotkey trigger)
+            if ((DateTime.UtcNow - _lastShownUtc).TotalMilliseconds < 240)
+            {
+                return;
+            }
+
+            EnsureOnUiThread(() =>
+            {
+                if (!IsOverlayVisible || _overlayWindow == null) return;
+
+                // Do not auto-close if user clicked a button on the overlay toolbar or is dragging in move mode
+                if (_overlayWindow.IsPhysicalPointOnToolbar(pt.X, pt.Y))
+                {
+                    return;
+                }
+                if (_isMoveMode && _overlayWindow.IsPhysicalPointInsideWindow(pt.X, pt.Y))
+                {
+                    return;
+                }
+
+                CloseOverlay();
+            });
+        }
+
+        public static (WpfColor Bg, WpfColor Fg) ComputeAutoSampleColors(SampledRegionStyle sampled, byte userAlpha)
+        {
+            if (sampled == null)
+            {
+                return (WpfColor.FromArgb(userAlpha, 24, 28, 36), WpfColor.FromRgb(245, 248, 255));
+            }
+
+            byte r = sampled.BackgroundColor.R;
+            byte g = sampled.BackgroundColor.G;
+            byte b = sampled.BackgroundColor.B;
+            double lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+            if (sampled.IsComplexBackground)
+            {
+                // Preserve hue and tone while ensuring contrast for text legibility (never crush to black)
+                if (lum >= 115.0 && lum <= 165.0)
+                {
+                    r = (byte)(r * 0.78);
+                    g = (byte)(g * 0.78);
+                    b = (byte)(b * 0.78);
+                    lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                }
+                byte complexAlpha = (byte)Math.Max(185, Math.Min(238, (int)Math.Round(userAlpha * 0.90)));
+                var fgComplex = lum < 145.0
+                    ? WpfColor.FromRgb(245, 248, 255)
+                    : WpfColor.FromRgb(15, 23, 42);
+                return (WpfColor.FromArgb(complexAlpha, r, g, b), fgComplex);
+            }
+
+            byte solidAlpha = (byte)Math.Max(205, Math.Min(246, (int)Math.Round(userAlpha * 0.96)));
+            var fg = WpfColor.FromRgb(sampled.ForegroundColor.R, sampled.ForegroundColor.G, sampled.ForegroundColor.B);
+            return (WpfColor.FromArgb(solidAlpha, r, g, b), fg);
         }
 
         public void ShowLoadingState(Rectangle targetPhysicalRect, string statusMessage = "Распознавание и перевод...")
@@ -91,6 +156,7 @@ namespace ScreenTranslator.Services
                 _showingOriginalBitmap = false;
 
                 EnsureOverlayWindow();
+                _lastShownUtc = DateTime.UtcNow;
                 _overlayWindow.RenderTranslation(ocr, translation, _settings.Current, _showingOriginalBitmap, _isMoveMode);
 
                 if (_settings.Current.AutoHideOverlaySeconds > 0)
@@ -208,6 +274,17 @@ namespace ScreenTranslator.Services
             });
         }
 
+        public void DisableOverlayToolbar()
+        {
+            EnsureOnUiThread(() =>
+            {
+                _settings.Current.ShowOverlayToolbar = false;
+                _settings.Save();
+                RefreshCurrentOverlayStyle();
+                ToolbarSettingChanged?.Invoke();
+            });
+        }
+
         private void EnsureOverlayWindow()
         {
             if (_overlayWindow == null || !_overlayWindow.IsLoaded)
@@ -217,6 +294,7 @@ namespace ScreenTranslator.Services
                     onRepeat: () => RepeatTranslationRequested?.Invoke(),
                     onNewRegion: () => SelectNewRegionRequested?.Invoke(),
                     onToggleMove: ToggleMoveMode,
+                    onDisableToolbar: DisableOverlayToolbar,
                     onClose: CloseOverlay);
 
                 _overlayWindow.Show();
@@ -282,16 +360,23 @@ namespace ScreenTranslator.Services
     internal sealed class TranslationOverlayWindow : Window
     {
         private const int ToolbarHeightDip = 32;
+        private const int WM_MOUSEACTIVATE = 0x0021;
+        private const int MA_NOACTIVATE = 3;
+
         private readonly Action _onToggleOriginal;
         private readonly Action _onRepeat;
         private readonly Action _onNewRegion;
         private readonly Action _onToggleMove;
+        private readonly Action _onDisableToolbar;
         private readonly Action _onClose;
 
         private readonly Canvas _rootCanvas;
         private Rectangle _currentPhysicalWindowRect;
+        private Rectangle _currentToolbarPhysicalRect;
         private double _dpiScale = 1.0;
         private bool _isDraggingWindow;
+        private bool _currentIsMoveMode;
+        private bool _hideOnLeftClick = true;
         private NativeMethods.POINT _dragStartCursor;
         private Rectangle _dragStartWindowRect;
 
@@ -300,12 +385,14 @@ namespace ScreenTranslator.Services
             Action onRepeat,
             Action onNewRegion,
             Action onToggleMove,
+            Action onDisableToolbar,
             Action onClose)
         {
             _onToggleOriginal = onToggleOriginal;
             _onRepeat = onRepeat;
             _onNewRegion = onNewRegion;
             _onToggleMove = onToggleMove;
+            _onDisableToolbar = onDisableToolbar;
             _onClose = onClose;
 
             WindowStyle = WindowStyle.None;
@@ -339,8 +426,39 @@ namespace ScreenTranslator.Services
                 NativeMethods.SetWindowLong(
                     hwnd,
                     NativeMethods.GWL_EXSTYLE,
-                    exStyle | NativeMethods.WS_EX_TOOLWINDOW | NativeMethods.WS_EX_NOACTIVATE);
+                    exStyle | NativeMethods.WS_EX_TOOLWINDOW);
+
+                HwndSource source = HwndSource.FromHwnd(hwnd);
+                source?.AddHook(WndProc);
             }
+        }
+
+        private static IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            if (msg == WM_MOUSEACTIVATE)
+            {
+                handled = true;
+                return new IntPtr(MA_NOACTIVATE);
+            }
+            return IntPtr.Zero;
+        }
+
+        public bool IsPhysicalPointOnToolbar(int x, int y)
+        {
+            if (_currentToolbarPhysicalRect.Width <= 0 || _currentToolbarPhysicalRect.Height <= 0)
+            {
+                return false;
+            }
+            return _currentToolbarPhysicalRect.Contains(x, y);
+        }
+
+        public bool IsPhysicalPointInsideWindow(int x, int y)
+        {
+            if (_currentPhysicalWindowRect.Width <= 0 || _currentPhysicalWindowRect.Height <= 0)
+            {
+                return false;
+            }
+            return _currentPhysicalWindowRect.Contains(x, y);
         }
 
         public void UpdateExcludeFromCapture(bool exclude, out bool applied)
@@ -376,6 +494,7 @@ namespace ScreenTranslator.Services
             int minPhysW = Math.Max(targetPhysicalRect.Width, (int)(280 * _dpiScale));
             int minPhysH = Math.Max(targetPhysicalRect.Height, (int)(54 * _dpiScale));
             _currentPhysicalWindowRect = new Rectangle(targetPhysicalRect.Left, targetPhysicalRect.Top, minPhysW, minPhysH);
+            _currentToolbarPhysicalRect = _currentPhysicalWindowRect;
             ApplyPhysicalPosition();
 
             _rootCanvas.Children.Clear();
@@ -435,6 +554,9 @@ namespace ScreenTranslator.Services
             bool showingOriginalBitmap,
             bool isMoveMode)
         {
+            _currentIsMoveMode = isMoveMode;
+            _hideOnLeftClick = settings.HideOverlayOnLeftClick;
+
             Rectangle captureRect = ocr.CapturedScreenRect;
             _dpiScale = NativeMethods.GetDpiScaleForPoint(captureRect.Left, captureRect.Top);
             if (_dpiScale <= 0) _dpiScale = 1.0;
@@ -445,11 +567,20 @@ namespace ScreenTranslator.Services
 
             int winPhysX = captureRect.Left;
             int winPhysY = toolbarOnTop ? captureRect.Top - toolbarPhysH : captureRect.Top;
-            int minToolbarPhysW = settings.ShowOverlayToolbar ? (int)Math.Ceiling(330 * _dpiScale) : captureRect.Width;
+            int minToolbarPhysW = settings.ShowOverlayToolbar ? (int)Math.Ceiling(415 * _dpiScale) : captureRect.Width;
             int winPhysW = Math.Max(captureRect.Width, minToolbarPhysW);
             int winPhysH = captureRect.Height + toolbarPhysH;
 
             _currentPhysicalWindowRect = new Rectangle(winPhysX, winPhysY, winPhysW, winPhysH);
+            if (settings.ShowOverlayToolbar)
+            {
+                int tbPhysY = toolbarOnTop ? winPhysY : (winPhysY + captureRect.Height);
+                _currentToolbarPhysicalRect = new Rectangle(winPhysX, tbPhysY, winPhysW, toolbarPhysH + (int)Math.Ceiling(6 * _dpiScale));
+            }
+            else
+            {
+                _currentToolbarPhysicalRect = Rectangle.Empty;
+            }
             ApplyPhysicalPosition();
 
             _rootCanvas.Children.Clear();
@@ -596,15 +727,44 @@ namespace ScreenTranslator.Services
                 double dipW = Math.Max(24, paddedPhys.Width / dpiScale);
                 double dipH = Math.Max(16, paddedPhys.Height / dpiScale);
 
+                // Bound available horizontal width by any neighbor on the same row to prevent horizontal overlap
+                double availableRightWidth = (ocr.CapturedScreenRect.Width / dpiScale) - dipX;
+                double maxAllowedHeightDip = (ocr.CapturedScreenRect.Height / dpiScale) - dipY;
+
+                for (int j = 0; j < ocr.Lines.Count; j++)
+                {
+                    if (j == i) continue;
+                    var other = ocr.Lines[j].BoundingBox;
+
+                    int vOverlap = Math.Min(paddedPhys.Bottom, other.Bottom) - Math.Max(paddedPhys.Top, other.Top);
+                    if (vOverlap > 4 && other.Left > paddedPhys.Left)
+                    {
+                        double gapToRightNeighbor = (other.Left / dpiScale) - dipX - 4;
+                        if (gapToRightNeighbor >= dipW && gapToRightNeighbor < availableRightWidth)
+                        {
+                            availableRightWidth = gapToRightNeighbor;
+                        }
+                    }
+
+                    int hOverlap = Math.Min(paddedPhys.Right, other.Right) - Math.Max(paddedPhys.Left, other.Left);
+                    if (hOverlap > 8 && other.Top >= paddedPhys.Bottom - 4)
+                    {
+                        double gapToLowerNeighbor = (other.Top / dpiScale) - dipY - 1;
+                        if (gapToLowerNeighbor >= dipH && gapToLowerNeighbor < maxAllowedHeightDip)
+                        {
+                            maxAllowedHeightDip = gapToLowerNeighbor;
+                        }
+                    }
+                }
+
                 var (bgBrush, fgBrush, borderBrush) = ResolveOverlayColors(line.Style, settings.OverlayBgMode, userAlpha, isMoveMode);
 
+                double maxTargetWidthDip = Math.Max(dipW, Math.Min(dipW * 1.35, availableRightWidth));
                 double fontSize = settings.AutoFitFontSize
-                    ? CalculateFittedLineFontSize(translatedLine, fontFamily, dipW - 6, dipH - 2, dpiScale)
+                    ? CalculateFittedLineFontSize(translatedLine, fontFamily, maxTargetWidthDip - 6, dipH - 2, dpiScale)
                     : settings.FixedFontSize;
 
-                // Allow slight horizontal expansion if Russian text is slightly wider than original English word and space is available
                 double measuredWidth = MeasureSingleLineTextWidth(translatedLine, fontFamily, fontSize, dpiScale) + 8;
-                double availableRightWidth = (ocr.CapturedScreenRect.Width / dpiScale) - dipX;
                 double finalWidth = Math.Max(dipW, Math.Min(measuredWidth, availableRightWidth));
 
                 var lineBorder = new Border
@@ -612,6 +772,7 @@ namespace ScreenTranslator.Services
                     MinWidth = dipW,
                     Width = finalWidth,
                     MinHeight = dipH,
+                    MaxHeight = Math.Max(dipH + 6, maxAllowedHeightDip),
                     Background = bgBrush,
                     BorderBrush = borderBrush,
                     BorderThickness = new Thickness(borderBrush != WpfBrushes.Transparent ? 1 : 0),
@@ -627,6 +788,7 @@ namespace ScreenTranslator.Services
                     FontSize = fontSize,
                     Foreground = fgBrush,
                     TextWrapping = TextWrapping.Wrap,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
                     VerticalAlignment = VerticalAlignment.Center
                 };
 
@@ -644,12 +806,20 @@ namespace ScreenTranslator.Services
             {
                 var prev = lines[i - 1].BoundingBox;
                 var curr = lines[i].BoundingBox;
-                int verticalGap = curr.Top - prev.Bottom;
                 int avgH = Math.Max(12, (prev.Height + curr.Height) / 2);
-                int leftDiff = Math.Abs(curr.Left - prev.Left);
+                int verticalGap = curr.Top - prev.Bottom;
 
-                // If lines are far apart vertically or horizontally misaligned (like separate UI columns/buttons), render line-by-line
-                if (verticalGap > avgH * 1.1 || leftDiff > avgH * 4)
+                // If two boxes sit on the same horizontal row, they are side-by-side columns, not a vertical paragraph
+                if (verticalGap < -avgH * 0.35)
+                {
+                    return false;
+                }
+
+                int leftDiff = Math.Abs(curr.Left - prev.Left);
+                int hOverlap = Math.Min(prev.Right, curr.Right) - Math.Max(prev.Left, curr.Left);
+
+                // If lines are far apart vertically or don't overlap horizontally, render line-by-line
+                if (verticalGap > avgH * 1.25 || leftDiff > avgH * 5 || hOverlap <= 0)
                 {
                     return false;
                 }
@@ -689,41 +859,28 @@ namespace ScreenTranslator.Services
 
                 case OverlayBackgroundMode.AutoSample:
                 default:
-                    if (sampled != null && !sampled.IsComplexBackground)
+                    var (bgColor, fgColor) = OverlayService.ComputeAutoSampleColors(sampled, userAlpha);
+                    WpfBrush autoBorder = borderBrush;
+                    if (autoBorder == WpfBrushes.Transparent && sampled != null && sampled.IsComplexBackground)
                     {
-                        // Solid background detected: mask original text cleanly with exact sampled background color
-                        byte alpha = Math.Max(userAlpha, (byte)246);
-                        var bg = WpfColor.FromArgb(alpha, sampled.BackgroundColor.R, sampled.BackgroundColor.G, sampled.BackgroundColor.B);
-                        var fg = WpfColor.FromRgb(sampled.ForegroundColor.R, sampled.ForegroundColor.G, sampled.ForegroundColor.B);
-                        return (new SolidColorBrush(bg), new SolidColorBrush(fg), borderBrush);
+                        autoBorder = new SolidColorBrush(WpfColor.FromArgb(85, bgColor.R, bgColor.G, bgColor.B));
                     }
-                    else
-                    {
-                        // Complex background (game/photo/gradient): use calibrated high-legibility translucent backdrop
-                        byte alpha = Math.Max((byte)215, userAlpha);
-                        var bg = sampled != null
-                            ? WpfColor.FromArgb(alpha, (byte)(sampled.BackgroundColor.R * 0.35), (byte)(sampled.BackgroundColor.G * 0.35), (byte)(sampled.BackgroundColor.B * 0.4))
-                            : WpfColor.FromArgb(alpha, 17, 21, 28);
-                        var subtleBorder = borderBrush != WpfBrushes.Transparent
-                            ? borderBrush
-                            : new SolidColorBrush(WpfColor.FromArgb(110, 71, 85, 105));
-                        return (new SolidColorBrush(bg), new SolidColorBrush(WpfColor.FromRgb(248, 250, 252)), subtleBorder);
-                    }
+                    return (new SolidColorBrush(bgColor), new SolidColorBrush(fgColor), autoBorder);
             }
         }
 
         private static double CalculateFittedLineFontSize(string text, WpfFontFamily fontFamily, double targetWidthDip, double targetHeightDip, double dpiScale)
         {
-            double initialSize = Math.Max(10.0, Math.Min(26.0, targetHeightDip * 0.72));
-            for (double size = initialSize; size >= 9.5; size -= 0.5)
+            double initialSize = Math.Max(9.5, Math.Min(25.0, targetHeightDip * 0.72));
+            for (double size = initialSize; size >= 8.5; size -= 0.5)
             {
                 double w = MeasureSingleLineTextWidth(text, fontFamily, size, dpiScale);
-                if (w <= targetWidthDip * 1.18)
+                if (w <= Math.Max(24.0, targetWidthDip * 1.04))
                 {
                     return size;
                 }
             }
-            return Math.Max(9.5, initialSize * 0.68);
+            return 8.5;
         }
 
         private static double CalculateFittedBlockFontSize(string text, WpfFontFamily fontFamily, double boxWidthDip, double boxHeightDip, double avgLineHeightDip, double dpiScale)
@@ -771,7 +928,7 @@ namespace ScreenTranslator.Services
         {
             var bar = new Border
             {
-                Background = new SolidColorBrush(WpfColor.FromArgb(240, 17, 20, 27)),
+                Background = new SolidColorBrush(WpfColor.FromArgb(242, 17, 20, 27)),
                 BorderBrush = new SolidColorBrush(WpfColor.FromRgb(42, 49, 64)),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(6),
@@ -824,6 +981,12 @@ namespace ScreenTranslator.Services
                 catch { }
             });
             row.Children.Add(copyBtn);
+
+            row.Children.Add(CreateToolbarPillButton(
+                "Без панели",
+                VectorIcons.EyeHide,
+                false,
+                () => _onDisableToolbar?.Invoke()));
 
             row.Children.Add(CreateToolbarIconButton(
                 VectorIcons.MoveDrag,
@@ -881,10 +1044,14 @@ namespace ScreenTranslator.Services
             {
                 if (!active) border.Background = WpfBrushes.Transparent;
             };
-            border.MouseLeftButtonUp += (s, e) =>
+            border.MouseLeftButtonDown += (s, e) =>
             {
                 e.Handled = true;
                 onClick?.Invoke();
+            };
+            border.MouseLeftButtonUp += (s, e) =>
+            {
+                e.Handled = true;
             };
 
             return border;
@@ -918,10 +1085,14 @@ namespace ScreenTranslator.Services
             {
                 if (!active) border.Background = WpfBrushes.Transparent;
             };
-            border.MouseLeftButtonUp += (s, e) =>
+            border.MouseLeftButtonDown += (s, e) =>
             {
                 e.Handled = true;
                 onClick?.Invoke();
+            };
+            border.MouseLeftButtonUp += (s, e) =>
+            {
+                e.Handled = true;
             };
 
             return border;
@@ -929,10 +1100,19 @@ namespace ScreenTranslator.Services
 
         private void OnWindowMouseDown(object sender, MouseButtonEventArgs e)
         {
-            if (!NativeMethods.GetCursorPos(out _dragStartCursor)) return;
-            _dragStartWindowRect = _currentPhysicalWindowRect;
-            _isDraggingWindow = true;
-            CaptureMouse();
+            if (_currentIsMoveMode)
+            {
+                if (!NativeMethods.GetCursorPos(out _dragStartCursor)) return;
+                _dragStartWindowRect = _currentPhysicalWindowRect;
+                _isDraggingWindow = true;
+                CaptureMouse();
+                return;
+            }
+
+            if (_hideOnLeftClick)
+            {
+                _onClose?.Invoke();
+            }
         }
 
         private void OnWindowMouseMove(object sender, MouseEventArgs e)

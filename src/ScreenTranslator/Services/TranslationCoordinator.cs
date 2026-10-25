@@ -63,11 +63,13 @@ namespace ScreenTranslator.Services
             _hotkeys.TranslateRegionRequested += () => StartRegionSelection();
             _hotkeys.ToggleOverlayRequested += () => _overlay.ToggleOverlayVisibility();
             _hotkeys.EscapePressed += OnEscapePressed;
+            _hotkeys.LeftMouseButtonDown += pt => _overlay.HandleGlobalLeftMouseDown(pt);
             _hotkeys.HotkeyConflictDetected += msg => NotificationMessage?.Invoke(msg, true);
 
             _overlay.RepeatTranslationRequested += () => _ = RepeatLastTranslationAsync();
             _overlay.SelectNewRegionRequested += () => StartRegionSelection();
             _overlay.OverlayVisibilityChanged += UpdateEscapeHookState;
+            _overlay.ToolbarSettingChanged += () => StateChanged?.Invoke();
         }
 
         private void OnEscapePressed()

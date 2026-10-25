@@ -305,9 +305,13 @@ namespace ScreenTranslator.Services
                         Style = lineStyle,
                         Words = words
                     });
+                }
 
+                output.Lines = MergeCollinearHorizontalLines(output.Lines, bmp, screenRect);
+                foreach (var mergedLine in output.Lines)
+                {
                     if (sb.Length > 0) sb.AppendLine();
-                    sb.Append(cleanedLine);
+                    sb.Append(mergedLine.Text);
                 }
 
                 output.FullText = sb.ToString().Trim();
@@ -433,6 +437,112 @@ namespace ScreenTranslator.Services
             }
             if (totalNonSpace == 0) return 0;
             return lettersOrDigits * 3 - (totalNonSpace - lettersOrDigits);
+        }
+
+        public static List<RecognizedTextLine> MergeCollinearHorizontalLines(
+            IReadOnlyList<RecognizedTextLine> rawLines,
+            Bitmap bmp,
+            Rectangle screenRect)
+        {
+            if (rawLines == null || rawLines.Count == 0)
+            {
+                return new List<RecognizedTextLine>();
+            }
+            if (rawLines.Count == 1)
+            {
+                return new List<RecognizedTextLine>(rawLines);
+            }
+
+            // Sort primarily by vertical center, then by Left
+            var sorted = rawLines
+                .Where(l => l != null && !string.IsNullOrWhiteSpace(l.Text))
+                .OrderBy(l => l.BoundingBox.Top + l.BoundingBox.Height / 2)
+                .ThenBy(l => l.BoundingBox.Left)
+                .ToList();
+
+            var rows = new List<List<RecognizedTextLine>>();
+            foreach (var line in sorted)
+            {
+                int cy = line.BoundingBox.Top + line.BoundingBox.Height / 2;
+                List<RecognizedTextLine> matchedRow = null;
+
+                foreach (var row in rows)
+                {
+                    double rowCy = row.Average(r => r.BoundingBox.Top + r.BoundingBox.Height / 2.0);
+                    double avgH = Math.Max(10.0, (row.Average(r => r.BoundingBox.Height) + line.BoundingBox.Height) * 0.5);
+
+                    int overlapTop = Math.Max((int)row.Min(r => r.BoundingBox.Top), line.BoundingBox.Top);
+                    int overlapBottom = Math.Min((int)row.Max(r => r.BoundingBox.Bottom), line.BoundingBox.Bottom);
+                    int overlapH = Math.Max(0, overlapBottom - overlapTop);
+                    int minH = Math.Max(1, Math.Min((int)row.Average(r => r.BoundingBox.Height), line.BoundingBox.Height));
+
+                    if (Math.Abs(cy - rowCy) <= avgH * 0.55 || overlapH >= minH * 0.45)
+                    {
+                        matchedRow = row;
+                        break;
+                    }
+                }
+
+                if (matchedRow != null)
+                {
+                    matchedRow.Add(line);
+                }
+                else
+                {
+                    rows.Add(new List<RecognizedTextLine> { line });
+                }
+            }
+
+            var mergedResult = new List<RecognizedTextLine>();
+            foreach (var row in rows.OrderBy(r => r.Min(x => x.BoundingBox.Top)))
+            {
+                var leftToRight = row.OrderBy(x => x.BoundingBox.Left).ToList();
+                var current = leftToRight[0];
+
+                for (int i = 1; i < leftToRight.Count; i++)
+                {
+                    var next = leftToRight[i];
+                    int gapX = next.BoundingBox.Left - current.BoundingBox.Right;
+                    int avgH = Math.Max(12, (current.BoundingBox.Height + next.BoundingBox.Height) / 2);
+                    int maxMergeGap = Math.Max(52, (int)Math.Round(avgH * 4.2));
+
+                    if (gapX <= maxMergeGap)
+                    {
+                        Rectangle unionBox = Rectangle.Union(current.BoundingBox, next.BoundingBox);
+                        var combinedWords = new List<RecognizedWordRect>();
+                        if (current.Words != null) combinedWords.AddRange(current.Words);
+                        if (next.Words != null) combinedWords.AddRange(next.Words);
+
+                        string joinedText = (current.Text.TrimEnd() + " " + next.Text.TrimStart()).Trim();
+                        var sampledStyle = bmp != null
+                            ? ScreenCaptureService.SampleRegionStyle(bmp, unionBox)
+                            : current.Style;
+
+                        current = new RecognizedTextLine
+                        {
+                            Text = joinedText,
+                            TranslatedText = string.Empty,
+                            BoundingBox = unionBox,
+                            ScreenBoundingBox = new Rectangle(
+                                screenRect.Left + unionBox.Left,
+                                screenRect.Top + unionBox.Top,
+                                unionBox.Width,
+                                unionBox.Height),
+                            Style = sampledStyle,
+                            Words = combinedWords
+                        };
+                    }
+                    else
+                    {
+                        mergedResult.Add(current);
+                        current = next;
+                    }
+                }
+
+                mergedResult.Add(current);
+            }
+
+            return mergedResult;
         }
 
         private static void FilterLinesNearCursor(OcrRecognitionResult result, Point cursorPhysicalPos)
