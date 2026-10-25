@@ -29,6 +29,10 @@ namespace ScreenTranslator.Tests
             RunTest("TextRecognitionService_DetectsWhenCursorRegionNeedsExpansion", TestAdaptiveCursorExpansionLogic);
             RunTest("TranslationService_ReturnsClearErrorWhenDeepLKeyMissing", () => TestTranslationMissingKeyError().GetAwaiter().GetResult());
             RunTest("TranslationService_UsesCacheOnRepeatedRequests", () => TestTranslationCacheHit().GetAwaiter().GetResult());
+            RunTest("TranslationService_AlignsMultilineTranslationsProportionally", TestMultilineAlignment);
+            RunTest("ScreenCaptureService_HandlesMultiMonitorNegativeCoordinates", TestMultiMonitorNegativeCoordinates);
+            RunTest("HotkeyConfig_FormatsModifiersAndKeysCorrectly", TestHotkeyFormatting);
+            RunTest("TrayService_GeneratesValidVectorIcon", TestTrayIconCreation);
 
             Console.WriteLine("---------------------------------------------");
             Console.WriteLine($"Total: {_passed + _failed} | Passed: {_passed} | Failed: {_failed}");
@@ -292,6 +296,52 @@ namespace ScreenTranslator.Tests
             finally
             {
                 if (Directory.Exists(tempDir)) Directory.Delete(tempDir, true);
+            }
+        }
+
+        private static void TestMultilineAlignment()
+        {
+            var ocrLines = new List<RecognizedTextLine>
+            {
+                new RecognizedTextLine { Text = "First line of text", BoundingBox = new Rectangle(10, 10, 200, 22) },
+                new RecognizedTextLine { Text = "Second line of text", BoundingBox = new Rectangle(10, 36, 200, 22) }
+            };
+            var trans = new TranslationResult
+            {
+                Success = true,
+                TranslatedText = "Первая строка текста\nВторая строка текста"
+            };
+            TranslationService.PopulateLineTranslations(ocrLines, trans);
+            AssertEqual("Первая строка текста", ocrLines[0].TranslatedText, "First line alignment mismatch");
+            AssertEqual("Вторая строка текста", ocrLines[1].TranslatedText, "Second line alignment mismatch");
+        }
+
+        private static void TestMultiMonitorNegativeCoordinates()
+        {
+            var virtualBounds = Win32.NativeMethods.GetVirtualScreenBounds();
+            var req = new Rectangle(virtualBounds.Left + 20, virtualBounds.Top + 20, 300, 120);
+            var clamped = ScreenCaptureService.ClampToVirtualScreen(req);
+            AssertEqual(req.Left, clamped.Left, "Negative or primary virtual screen X should be preserved");
+            AssertEqual(300, clamped.Width, "Width should be preserved inside virtual screen");
+        }
+
+        private static void TestHotkeyFormatting()
+        {
+            var hk = new HotkeyConfig
+            {
+                Modifiers = Win32.NativeMethods.MOD_CONTROL | Win32.NativeMethods.MOD_SHIFT,
+                VirtualKey = 'T'
+            };
+            AssertEqual("Ctrl + Shift + T", hk.ToReadableString(), "Hotkey string formatting mismatch");
+        }
+
+        private static void TestTrayIconCreation()
+        {
+            using var icon = TrayService.CreateVectorTrayIcon(isPaused: false, out IntPtr hIcon);
+            AssertTrue(icon != null && icon.Width == 32 && icon.Height == 32, "Expected 32x32 tray icon");
+            if (hIcon != IntPtr.Zero)
+            {
+                Win32.NativeMethods.DeleteObject(hIcon);
             }
         }
     }

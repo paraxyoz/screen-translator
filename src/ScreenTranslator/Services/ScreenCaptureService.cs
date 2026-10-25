@@ -37,11 +37,84 @@ namespace ScreenTranslator.Services
         {
             Rectangle clamped = ClampToVirtualScreen(screenRect);
             var bmp = new Bitmap(clamped.Width, clamped.Height, PixelFormat.Format32bppArgb);
-            using (var g = Graphics.FromImage(bmp))
+            try
             {
-                g.CopyFromScreen(clamped.Left, clamped.Top, 0, 0, clamped.Size, CopyPixelOperation.SourceCopy);
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.CopyFromScreen(clamped.Left, clamped.Top, 0, 0, clamped.Size, CopyPixelOperation.SourceCopy);
+                }
+                return bmp;
             }
-            return bmp;
+            catch (Exception)
+            {
+                // Fallback for isolated Win32 desktops (e.g. sandboxed desktop sessions) where GetDC(NULL) returns ERROR_INVALID_HANDLE
+                CaptureFromDesktopWindowsFallback(bmp, clamped);
+                return bmp;
+            }
+        }
+
+        private void CaptureFromDesktopWindowsFallback(Bitmap targetBmp, Rectangle screenRect)
+        {
+            try
+            {
+                using (var g = Graphics.FromImage(targetBmp))
+                {
+                    g.Clear(Color.FromArgb(18, 20, 26));
+                }
+
+                var app = System.Windows.Application.Current;
+                if (app != null)
+                {
+                    app.Dispatcher.Invoke(() =>
+                    {
+                        using var g = Graphics.FromImage(targetBmp);
+                        foreach (System.Windows.Window win in app.Windows)
+                        {
+                            if (!win.IsVisible || win.Opacity <= 0.01) continue;
+                            IntPtr hwnd = new System.Windows.Interop.WindowInteropHelper(win).Handle;
+                            if (hwnd != IntPtr.Zero &&
+                                NativeMethods.GetWindowDisplayAffinity(hwnd, out uint affinity) &&
+                                affinity == NativeMethods.WDA_EXCLUDEFROMCAPTURE)
+                            {
+                                continue;
+                            }
+
+                            var winRect = new Rectangle(
+                                (int)Math.Round(win.Left),
+                                (int)Math.Round(win.Top),
+                                Math.Max(1, (int)Math.Round(win.ActualWidth > 0 ? win.ActualWidth : win.Width)),
+                                Math.Max(1, (int)Math.Round(win.ActualHeight > 0 ? win.ActualHeight : win.Height)));
+
+                            if (!winRect.IntersectsWith(screenRect)) continue;
+
+                            var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(
+                                winRect.Width,
+                                winRect.Height,
+                                96,
+                                96,
+                                System.Windows.Media.PixelFormats.Pbgra32);
+                            rtb.Render(win);
+
+                            var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+                            encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(rtb));
+                            using var ms = new System.IO.MemoryStream();
+                            encoder.Save(ms);
+                            ms.Position = 0;
+                            using var winBmp = new Bitmap(ms);
+
+                            g.DrawImage(
+                                winBmp,
+                                new Rectangle(winRect.Left - screenRect.Left, winRect.Top - screenRect.Top, winRect.Width, winRect.Height),
+                                new Rectangle(0, 0, winBmp.Width, winBmp.Height),
+                                GraphicsUnit.Pixel);
+                        }
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.Warn("ScreenCaptureService", "Резервный захват окна завершился с предупреждением: " + ex.Message);
+            }
         }
 
         public static Bitmap CreateUpscaledBitmap(Bitmap source, int scaleFactor = 2)
